@@ -1,5 +1,7 @@
 # Dragon Curve, Forever
 
+[Open the live site](https://compositor.github.io/dragon/)
+
 An interactive Heighway dragon curve that keeps drawing while the page is open. Built with plain HTML, CSS, JavaScript, Canvas 2D, and Web Audio. No build tools, dependencies, accounts, or external assets are needed.
 
 ![Rainbow dragon curve with playback and zoom controls](docs/preview.png)
