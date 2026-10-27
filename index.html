@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dragon Curve · Forever</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#0c1219;color:#eaf0f5;font:16px system-ui,sans-serif}main{max-width:1200px;margin:auto;padding:28px 24px}.eyebrow{color:#6edccb;text-transform:uppercase;letter-spacing:.18em;font-size:12px}h1{font-size:clamp(30px,5vw,46px);letter-spacing:-.04em;margin:5px 0 8px;font-weight:600}p{margin:0;color:#aab8c6;line-height:1.5}.controls{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:22px 0 16px}label{display:flex;align-items:center;gap:12px;flex-wrap:wrap}input{width:150px;accent-color:#6edccb}output{min-width:7ch;font-variant-numeric:tabular-nums}button{font:inherit;border:1px solid #3c505e;border-radius:8px;padding:10px 17px;color:#eaf0f5;background:#1b2934;cursor:pointer}button:hover{background:#263c48}button:focus-visible,input:focus-visible{outline:2px solid #6edccb;outline-offset:4px}#pause{background:#6edccb;border-color:#6edccb;color:#102722;min-width:100px}.stage{border:1px solid #283642;border-radius:12px;overflow:hidden;background:radial-gradient(ellipse at center,#172632,#0c1219)}canvas{touch-action:none;cursor:grab;width:100%;height:clamp(340px,65vh,720px);display:block}footer{display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-top:14px;font-size:13px;color:#aab8c6}#status{font-variant-numeric:tabular-nums}@media(max-width:480px){main{padding:22px 16px}.controls{gap:10px}label{width:100%}input{flex:1}}
+</style>
+</head>
+<body>
+<main>
+<div class="eyebrow">An endless mathematical walk</div>
+<h1>Dragon curve, forever.</h1>
+<p>One unbroken line, always finding its next turn.</p>
+<div class="controls">
+<button id="pause" type="button" aria-pressed="false">Pause</button>
+<label for="speed">Speed <input id="speed" type="range" min="0" max="6" step="0.05" value="3" aria-label="Drawing speed"></label>
+<label for="rate"><input id="rate" type="number" min="1" step="1" value="1000" style="width:120px;padding:9px;border:1px solid #3c505e;border-radius:8px;background:#1b2934;color:#eaf0f5;font:inherit" aria-label="Segments per second"> segments/s</label>
+<label for="maximum"><input id="maximum" type="checkbox" style="width:auto"> Maximum speed</label>
+<button id="music" type="button" aria-pressed="false">Music: off</button>
+<label for="volume">Volume <input id="volume" type="range" min="0" max="100" value="30"></label>
+<button id="restart" type="button">Start over</button>
+<button id="save" type="button">Save PNG</button>
+</div>
+<div class="controls" role="group" aria-label="View controls">
+<button id="zoomOut" type="button" aria-label="Zoom out">Zoom out −</button>
+<output id="zoomLevel" aria-live="polite">Auto fit</output>
+<button id="zoomIn" type="button" aria-label="Zoom in">Zoom in +</button>
+<button id="fit" type="button">Fit entire curve</button>
+<span style="color:#aab8c6;font-size:13px">Scroll to zoom · Drag to pan</span>
+</div>
+<div class="stage"><canvas id="curve" role="img" aria-label="Continuously growing dragon curve, with the newest point marked by a bright dot">Canvas support is needed to draw the dragon curve.</canvas></div>
+<footer><span>Rainbow folds · Each rotated copy is lighter · Every segment is preserved</span><span id="status" role="status" aria-live="polite"></span></footer>
+</main>
+<script>
+'use strict';
+const canvas=document.getElementById('curve'),ctx=canvas.getContext('2d');
+const pauseButton=document.getElementById('pause');
+const status=document.getElementById('status');
+const directions=[[1,0],[0,1],[-1,0],[0,-1]];
+let points=[{x:0,y:0}],step=0n,direction=0,paused=false,lastTime=null;
+let camera={x:0,y:0,scale:16},lastStatus=0,renderCost=0;
+const speedInput=document.getElementById('speed'),rateInput=document.getElementById('rate'),maximumInput=document.getElementById('maximum');
+let targetRate=1000,credit=0;
+speedInput.addEventListener('input',()=>{
+ targetRate=Math.round(10**Number(speedInput.value));rateInput.value=targetRate;credit=0;
+});
+rateInput.addEventListener('input',()=>{
+ const value=Number(rateInput.value);
+ if(!Number.isSafeInteger(value)||value<1){rateInput.setCustomValidity('Enter a positive whole number.');return;}
+ rateInput.setCustomValidity('');targetRate=value;credit=0;
+ speedInput.value=Math.min(6,Math.max(0,Math.log10(value)));
+});
+maximumInput.addEventListener('change',()=>{
+ speedInput.disabled=maximumInput.checked;rateInput.disabled=maximumInput.checked;credit=0;
+});
+let bounds={minX:0,maxX:0,minY:0,maxY:0};
+let paths=[],activePaths=[],segmentDepths=[];
+const CHUNK_SIZE=2048;
+let manualView=null,lastView={x:0,y:0,scale:16},fitScale=16;
+const zoomLevel=document.getElementById('zoomLevel');
+function zoomBy(factor,screenX=canvas.clientWidth/2,screenY=canvas.clientHeight/2){
+ const current=manualView||lastView;
+ const nextScale=Math.max(0.000001,Math.min(10000,current.scale*factor));
+ // Keep the world coordinate under the cursor stationary as we zoom.
+ const dx=screenX-canvas.clientWidth/2,dy=screenY-canvas.clientHeight/2;
+ manualView={x:current.x+dx/current.scale-dx/nextScale,y:current.y+dy/current.scale-dy/nextScale,scale:nextScale};
+ zoomLevel.value=Math.round(nextScale/fitScale*100)+'% of fit';
+}
+function fitView(){manualView=null;zoomLevel.value='Auto fit';}
+document.getElementById('zoomIn').addEventListener('click',()=>zoomBy(1.5));
+document.getElementById('zoomOut').addEventListener('click',()=>zoomBy(1/1.5));
+document.getElementById('fit').addEventListener('click',fitView);
+canvas.addEventListener('wheel',event=>{
+ event.preventDefault();const rect=canvas.getBoundingClientRect();
+ const delta=event.deltaY*(event.deltaMode===1?16:event.deltaMode===2?canvas.clientHeight:1);
+ zoomBy(Math.exp(-Math.max(-200,Math.min(200,delta))*.003),event.clientX-rect.left,event.clientY-rect.top);
+},{passive:false});
+let drag=null;
+canvas.addEventListener('pointerdown',event=>{
+ if(event.button!==0)return;
+ canvas.setPointerCapture(event.pointerId);
+ manualView={...(manualView||lastView)};
+ drag={id:event.pointerId,x:event.clientX,y:event.clientY,view:{...manualView}};
+ canvas.style.cursor='grabbing';
+});
+canvas.addEventListener('pointermove',event=>{
+ if(!drag||drag.id!==event.pointerId)return;
+ manualView={x:drag.view.x-(event.clientX-drag.x)/drag.view.scale,y:drag.view.y-(event.clientY-drag.y)/drag.view.scale,scale:drag.view.scale};
+ zoomLevel.value=Math.round(manualView.scale/fitScale*100)+'% of fit';
+});
+function endDrag(event){if(drag&&event.pointerId===drag.id){drag=null;canvas.style.cursor='grab';}}
+canvas.addEventListener('pointerup',endDrag);canvas.addEventListener('pointercancel',endDrag);
+const reducedMotion=matchMedia('(prefers-reduced-motion: reduce)');
+
+// The regular paper-folding sequence supplies each turn without storing
+// the preceding turns. BigInt keeps the sequence index exact as it grows.
+function advance(count){
+ for(let i=0;i<count;i++){
+  const previous=points[points.length-1],delta=directions[direction];
+  const next={x:previous.x+delta[0],y:previous.y+delta[1]};
+  points.push(next);
+  bounds.minX=Math.min(bounds.minX,next.x);bounds.maxX=Math.max(bounds.maxX,next.x);
+  bounds.minY=Math.min(bounds.minY,next.y);bounds.maxY=Math.max(bounds.maxY,next.y);
+  // A fold appends a reversed, rotated copy of the preceding curve.
+  // For segment index j, its source is mirrored within the last power-of-two block.
+  const j=points.length-2;
+  const block=j===0?0:2**Math.floor(Math.log2(j));
+  const parent=j===0?-1:2*block-1-j;
+  const depth=parent<0?0:segmentDepths[parent]+1;
+  segmentDepths.push(depth);
+  let group=activePaths[depth];
+  if(!group||group.count===CHUNK_SIZE){
+   group={path:new Path2D(),depth,count:0};
+   paths.push(group);activePaths[depth]=group;
+  }
+  group.path.moveTo(previous.x,previous.y);
+  group.path.lineTo(next.x,next.y);group.count++;
+  step++;
+  const lowBit=step & -step;
+  direction=(direction+((step & (lowBit<<1n))===0n?1:3))%4;
+ }
+
+}
+function render(dt){
+ const width=canvas.clientWidth,height=canvas.clientHeight,dpr=Math.min(devicePixelRatio||1,2);
+ const w=Math.round(width*dpr),h=Math.round(height*dpr);
+ if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h;}
+ ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,width,height);
+ const {minX,maxX,minY,maxY}=bounds;
+ const scale=Math.min(20,(width-64)/Math.max(1,maxX-minX),(height-64)/Math.max(1,maxY-minY));
+ fitScale=scale;
+ const targetX=(minX+maxX)/2,targetY=(minY+maxY)/2;
+ const easing=reducedMotion.matches?1:1-Math.exp(-dt*5);
+ camera.x+=(targetX-camera.x)*easing;camera.y+=(targetY-camera.y)*easing;
+ camera.scale+=(scale-camera.scale)*easing;
+ // Clamp the smoothed camera to keep the full curve inside the viewport.
+ const s=manualView?manualView.scale:Math.min(camera.scale,scale);
+ const cx=manualView?manualView.x:Math.max(maxX-(width-48)/2/s,Math.min(minX+(width-48)/2/s,camera.x));
+ const cy=manualView?manualView.y:Math.max(maxY-(height-48)/2/s,Math.min(minY+(height-48)/2/s,camera.y));
+ lastView={x:cx,y:cy,scale:s};
+ const ox=width/2-cx*s,oy=height/2-cy*s;
+ ctx.lineWidth=Math.max(.7,Math.min(2,s*.35));ctx.lineCap='round';ctx.lineJoin='round';
+ // Cached paths retain every segment without rebuilding old geometry.
+ ctx.save();ctx.translate(ox,oy);ctx.scale(s,s);ctx.lineWidth/=s;
+ for(const group of paths){
+  // Strictly increasing lightness: each rotated descendant is brighter.
+  const lightness=40+48*(1-Math.pow(.9,group.depth));
+  const hue=(220+group.depth*137.508)%360;
+  ctx.strokeStyle=`hsl(${hue},95%,${lightness}%)`;
+  ctx.stroke(group.path);
+ }
+ ctx.restore();
+ const tip=points[points.length-1];
+ ctx.fillStyle='#f5df9e';ctx.beginPath();ctx.arc(ox+tip.x*s,oy+tip.y*s,3.5,0,Math.PI*2);ctx.fill();
+}
+function updateStatus(){status.textContent=step.toLocaleString()+' segments · '+(paused?'Paused':'Drawing forever');}
+function frame(time){
+ const dt=lastTime===null?0:Math.min((time-lastTime)/1000,.1);lastTime=time;
+ if(!paused){
+  // Use the available frame budget rather than a fixed segment rate.
+  // Yield for rendering, audio, and controls; there is no segment-count cap.
+  const deadline=performance.now()+Math.max(.02,4/(1+renderCost));
+  if(maximumInput.checked){
+   do{advance(16);}while(performance.now()<deadline);
+  }else{
+   credit+=dt*targetRate;
+   let remaining=Math.floor(credit);credit-=remaining;
+   // A target faster than the device can render runs at available throughput.
+   // Avoid accumulating a backlog that would delay later speed changes.
+   while(remaining>0){
+    const count=Math.min(256,remaining);advance(count);remaining-=count;
+    if(performance.now()>=deadline)break;
+   }
+  }
+ }
+ const renderStart=performance.now();
+ render(dt);
+ renderCost=performance.now()-renderStart;
+ if(time-lastStatus>1000){updateStatus();lastStatus=time;}
+ requestAnimationFrame(frame);
+}
+pauseButton.addEventListener('click',()=>{paused=!paused;pauseButton.textContent=paused?'Resume':'Pause';pauseButton.setAttribute('aria-pressed',String(paused));updateStatus();});
+document.getElementById('restart').addEventListener('click',()=>{points=[{x:0,y:0}];step=0n;direction=0;credit=0;camera={x:0,y:0,scale:16};bounds={minX:0,maxX:0,minY:0,maxY:0};paths=[];activePaths=[];segmentDepths=[];fitView();updateStatus();});
+document.getElementById('save').addEventListener('click',()=>{
+ const image=document.createElement('canvas');image.width=canvas.width;image.height=canvas.height;
+ const c=image.getContext('2d');c.fillStyle='#0c1219';c.fillRect(0,0,image.width,image.height);c.drawImage(canvas,0,0);
+ const a=document.createElement('a');a.download='dragon-curve-'+step+'.png';a.href=image.toDataURL('image/png');a.click();
+});
+// A local Web Audio soundtrack: soft pentatonic notes over slowly changing pads.
+// Audio begins only after pressing Music, as required by browser autoplay rules.
+const musicButton=document.getElementById('music'),volume=document.getElementById('volume');
+let audio=null,master=null,musicTimer=null,nextNote=0,beat=0,musicOn=false,musicBusy=false;
+function tone(frequency,when,duration,level,type='sine'){
+ const oscillator=audio.createOscillator(),envelope=audio.createGain();
+ oscillator.type=type;oscillator.frequency.value=frequency;
+ envelope.gain.setValueAtTime(0,when);
+ envelope.gain.linearRampToValueAtTime(level,when+.35);
+ envelope.gain.exponentialRampToValueAtTime(.0001,when+duration);
+ oscillator.connect(envelope);envelope.connect(master);
+ oscillator.start(when);oscillator.stop(when+duration+.05);
+ oscillator.onended=()=>{oscillator.disconnect();envelope.disconnect();};
+}
+function scheduleMusic(){
+ if(!musicOn||audio.state!=='running')return;
+ if(nextNote<audio.currentTime-.5)nextNote=audio.currentTime+.05;
+ const melody=[0,7,12,16,19,12,7,4,0,12,7,19,16,7,4,12];
+ const roots=[130.8128,110,87.3071,97.9989];
+ while(nextNote<audio.currentTime+.4){
+  const root=roots[Math.floor(beat/16)%roots.length];
+  tone(root*2*Math.pow(2,melody[beat%melody.length]/12),nextNote,3,.09);
+  if(beat%8===0){
+   tone(root/2,nextNote,6,.12);
+   tone(root,nextNote,6,.07);
+   tone(root*Math.pow(2,7/12),nextNote,6,.045);
+  }
+  nextNote+=.65;beat++;
+ }
+}
+volume.addEventListener('input',()=>{
+ if(master)master.gain.setTargetAtTime(Number(volume.value)/100*.5,audio.currentTime,.1);
+});
+musicButton.addEventListener('click',async()=>{
+ if(musicBusy)return;musicBusy=true;
+ try{
+  if(!audio){
+   audio=new (window.AudioContext||window.webkitAudioContext)();
+   master=audio.createGain();master.gain.value=Number(volume.value)/100*.5;
+   const compressor=audio.createDynamicsCompressor();
+   master.connect(compressor);compressor.connect(audio.destination);
+  }
+  if(musicOn){
+   musicOn=false;clearInterval(musicTimer);musicTimer=null;await audio.suspend();
+  }else{
+   await audio.resume();musicOn=true;nextNote=audio.currentTime+.05;
+   scheduleMusic();musicTimer=setInterval(scheduleMusic,150);
+  }
+  musicButton.textContent=musicOn?'Music: on':'Music: off';
+  musicButton.setAttribute('aria-pressed',String(musicOn));
+ }catch(error){
+  musicOn=false;clearInterval(musicTimer);musicTimer=null;
+  musicButton.textContent='Music unavailable';musicButton.setAttribute('aria-pressed','false');
+  console.error('Unable to start soundtrack',error);
+ }finally{musicBusy=false;}
+});
+// Resume smoothly after switching tabs instead of trying to catch up.
+document.addEventListener('visibilitychange',()=>{lastTime=null;});
+updateStatus();requestAnimationFrame(frame);
+</script>
+</body>
+</html>
